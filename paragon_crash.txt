@@ -1,0 +1,422 @@
+Aethro Paragon crashes the 3.3.5a client on /paragon
+====================================================
+
+Send this to whoever ships AethroParagon. The crash is in the addon the launcher distributes. It is not a bad cache, not SavedVariables, and not a player addon.
+
+Client
+------
+Game:            World of Warcraft build 12340 (WotLK 3.3.5a)
+Exe:             D:\Warcrafts\Aethro\Wow.exe
+Realm:           Aethro Reforged, 51.222.24.20:8086
+Account type:    LK
+Graphics:        D3D9Ex, NVIDIA GeForce RTX 4060, driver nvldumd.dll 32.0.0016.1088
+Resolution:      1920x1080 windowed, maximized
+textureFilteringMode 5, componentTextureLevel 9
+Addon interface: 30300
+Addon:           Aethro Paragon 1.0.2, author Grim-Batol / Aethro
+Saved vars:      AethroParagonCharacterDB (per character)
+Slash:           /paragon and /para  ->  UIParagon:Show()
+
+What the player did
+-------------------
+1. Archived every addon that is not shipped by the server.
+2. Deleted the cache.
+3. Archived the WTF folder.
+4. Logged in. Only these addons were loaded:
+
+     AethroParagon
+     AethroTitles
+     GuildVillageHelper
+     ReagentBankUI
+
+   AIO was on disk and was not in the loaded list.
+5. Typed /paragon.
+6. Wow.exe died before the window could be used.
+
+The same crash happened on 18 Oct 2026 and again on 21 Oct 2026. UIDebugger (a local click logger) was already archived and was not loaded for the 21 Oct crash. Do not treat that addon as the cause of this report.
+
+The error
+----------
+ERROR #132 (0x85100084) Fatal Exception
+Exception: 0xC0000005 ACCESS_VIOLATION
+The instruction could not WRITE the address it was given.
+
+Three captures, same instruction, different heap addresses:
+
+  18 Oct 2026, about 9:05 PM
+    fault  0x00411EDE
+    write  0x1D38F000
+    EDI    0x1D38EFC0
+    EDI+0x40 is the fault address
+
+  21 Oct 2026, 1:34:53 AM
+    fault  0x00411EDE
+    write  0x1DAFFF000
+    "The memory could not be written."
+
+  21 Oct 2026, 1:46:23 AM   (full log, Netherstorm, player Sultonmrp)
+    fault  0x00411EDE
+    write  0x1EB8E000
+    Current Addon:          (null)
+    Current Addon function: UNKNOWN
+    Current Addon object:   (null)
+    Lua memory:             14390 KB
+
+Lua is not on the stack. The addon function field is empty because the Lua in UIParagon_OnShow had already returned, or had not been entered yet, and the C renderer was drawing the frame. A Lua error would name the addon and the function. This does not.
+
+The instruction
+---------------
+Bytes at 0x00411EDE:
+
+  66 0F 7F 67 40
+  66 0F 7F 6F 50
+  66 0F 7F 77 60
+  66
+
+That is SSE:
+
+  movdqa xmmword ptr [edi+40h], xmm4
+  movdqa xmmword ptr [edi+50h], xmm5
+  movdqa xmmword ptr [edi+60h], xmm6
+
+movdqa stores 16 aligned bytes. The first store is the one that faults.
+
+Registers on the 1:46 crash (thread 28244, the crashing thread):
+
+  EAX = 1EB8C040    destination base
+  EBX = 2CF34020    source base
+  ECX = 00000001
+  EDX = 00000000
+  ESI = 2CF35FA0    source cursor
+  EDI = 1EB8DFC0    destination cursor
+  EBP = 04B1FB40
+  ESP = 04B1FB38
+  EIP = 00411EDE
+
+DBGHELP shows the call as:
+
+  Wow.exe  0x00411EDE  (0x1EB8C040, 0x2CF34020, 0x00002000, 0x00000000)
+
+The third argument is 0x2000. That is 8192 bytes. This function copies 8 KB from the source to the destination.
+
+  destination cursor - destination base = 0x1EB8DFC0 - 0x1EB8C040 = 0x1F80
+  source cursor      - source base      = 0x2CF35FA0 - 0x2CF34020 = 0x1F80
+
+Both pointers have walked 8064 bytes into an 8192-byte copy. The next store is at EDI+0x40, which is offset 0x1FC0 in the destination.
+
+  destination base + 0x2000 = 0x1EB8E040
+  fault address             = 0x1EB8E000
+
+0x1EB8E000 is a page boundary. The buffer they allocated ends on that page. The copy was asked to write 64 bytes past it (0x1EB8E040). The page was not writable, so Windows raised ACCESS_VIOLATION.
+
+EAX 0x1EB8C040 and EDI 0x1EB8DFC0 are both 16-byte aligned, so this is not an alignment fault. Alignment faults are a different exception. This is a write off the end of the buffer.
+
+The same +0x40 pattern is in the 18 Oct crash (EDI 0x1D38EFC0, fault 0x1D38F000). Same code, same overrun, new heap addresses. It will reproduce every time that texture is drawn.
+
+Call stack of the crashing thread, bottom of the copy up to the main loop. Every frame is Wow.exe until Windows:
+
+  0x00411EDE   the movdqa copy          (8192-byte blit)
+  0x00411F5D   caller of that copy
+  0x006AC1EC
+  0x006AE80D
+  0x006A61FF
+  0x006A637A
+  0x006A88CE
+  0x006A9114
+  0x00685BC3
+  0x006A987E
+  0x004850EA   frame / UI pump
+  0x00494F67
+  0x0049545B
+  0x004A8A42
+  0x00480B79
+  0x0047DC89
+  0x0047F29A
+  0x0047F2E1
+  0x0040B7D8   message loop
+  KERNELBASE
+
+NVIDIA threads in the same log are WaitForSingleObject inside nvd3dum.dll. They are idle. They did not fault.
+
+Why /paragon is the trigger
+---------------------------
+AethroParagon.lua:
+
+  SLASH_AETHROPARAGON1 = "/paragon"
+  UIParagon:Show()
+  SendClientRequest("ParagonAnniversary", 1)
+
+SendClientRequest in lib\CMH.lua only sends addon messages (SendAddonMessage). It is not a native draw. UIParagon_OnLoad already calls SendClientRequest at login, and login does not crash. The crash is the first time UIParagon is shown, which is the first time its textures are uploaded and drawn.
+
+UIParagon is created hidden (hidden="true") and inherits PortraitFrame2X, which inherits MetalFrame2X. Show() builds the metal border, the full-frame background, the flame overlay, the close button, the help icon, and the window XP chrome. That is the draw that enters 0x00411EDE.
+
+The other three loaded addons do not draw this frame.
+
+  AethroTitles       hooks PaperDollFrame_OnShow only.
+  GuildVillageHelper teleport button and minimap. No Paragon reference.
+  ReagentBankUI      reagent bank UI and a TradeSkillFrame_SetSelection hook.
+                     Its close button is its own template, not this window.
+
+What in the default XML crashes a 12340 client
+-----------------------------------------------
+The launcher copy of AethroParagon is written for a retail-style UI. Build 12340 does not have those templates, does not accept a zero-width tiled texture, and does not safely upload the retail BLP files.
+
+1. Zero-width tiled border. This is enough by itself.
+
+   File: Templates\UITemplate2X.xml
+   Frame: MetalFrame2X, texture $parentBorderTop
+
+   <Texture name="$parentBorderTop" parentKey="BorderTop"
+            file="Interface/FrameGeneral/UIFrameMetalHorizontal2x"
+            horizTile="true">
+       <Size x="32" y="75"/>
+       <TexCoords left="0" right="0" top="0.00390625" bottom="0.589844"/>
+   </Texture>
+
+   horizTile="true" tells the 3.3.5 blitter to repeat a tile across the border.
+   The tile width in texture space is right - left = 0 - 0 = 0.
+   A zero-width tile makes the repeat count explode. The blitter then copies
+   a fixed 8192-byte chunk past the buffer it allocated. That is the movdqa
+   at 0x00411EDE.
+
+   The same file also tiles the other three edges:
+
+   $parentBorderLeft    UIFrameMetalVertical2x    vertTile="true"
+   $parentBorderRight   UIFrameMetalVertical2x    vertTile="true"
+   $parentBorderBottom  UIFrameMetalHorizontal2x  horizTile="true"
+
+   BorderLeft and BorderRight are authored at Size y="0". BorderBottom is
+   authored at Size x="0". Combined with a tile flag, that is another
+   zero-length repeat. Remove horizTile and vertTile. On the top border set
+   TexCoords right to 1, not 0.
+
+2. Retail textures that are not 3.3.5 BLPs.
+
+   A missing file on 3.3.5 usually draws neon green. It does not access-violate.
+   A file that is present but is a newer BLP (wrong header, BC7 / BPTC, a mip
+   whose decoded size is not what build 12340 allocated) is uploaded by the
+   same 8192-byte copy and overruns. These paths are used by the default addon.
+   None of them exist as loose files next to the addon. If they are inside the
+   patched MPQs, they are the wrong format for this exe.
+
+   Templates\UITemplate2X.xml
+     Interface/FrameGeneral/UIFrameMetal2x
+     Interface/FrameGeneral/UIFrameMetalHorizontal2x
+     Interface/FrameGeneral/UIFrameMetalVertical2x
+     Interface/Buttons/redbutton2x
+     Interface\Buttons\128RedButton9Sliced
+     Interface\Buttons\128RedButton
+
+   Paragon\UIParagon.xml
+     Interface/Journeys/JourneysFrame2x
+     Interface/Common/portrait-ring-withbg
+     Interface/CovenantRenown/TheWarWithinMajorFactionsFlame
+     Interface/Paragon/ParagonUI
+     Interface\Housing\housingbasicpanelstonebackground2x
+     Interface/HUD/UIExperienceBar2x
+     Interface\Common\help-i
+
+   The housing background is the full-frame BACKGROUND of UIParagon, so it is
+   uploaded on the first Show(). The metal corners and the red close button
+   are part of PortraitFrame2X, so they upload on that same Show().
+
+   ParagonCharacterLevel (parent PlayerFrame) and ParagonTargetLevel (parent
+   TargetFrame) are hidden="false". They draw portrait-ring-withbg as soon as
+   the unit frames exist, not only when /paragon is typed. If that BLP is the
+   bad one, the client can also die at login.
+
+3. Inverted texcoord on the flame overlay.
+
+   Paragon\UIParagon.xml, texture HighlightBottom:
+
+   file="Interface\CovenantRenown\TheWarWithinMajorFactionsFlame"
+   TexCoords left="0.000976562" right="0.674805"
+             top="0.551758" bottom="0.258789"
+
+   bottom is less than top. That crop is upside down on purpose in retail.
+   Build 12340's blitter uses (bottom - top) as the copy height. A negative
+   height walks off the buffer. Set a normal range (bottom greater than top),
+   or drop the texture.
+
+   There is a second flame use on the level badge
+   ($parentLevelTexture, top 0.553711, bottom 0.768555). That one is ordered
+   correctly. The file itself is still a retail BLP.
+
+4. Frame levels below zero.
+
+   Paragon\ParagonExpBar.xml, launcher default:
+
+   <Frame name="ParagonExpBar" ... parent="MainMenuBar" hidden="true"
+          frameLevel="-1">
+   <StatusBar name="$parentStatusBar" frameLevel="-999" ...>
+
+   3.3.5 does not allow a negative frame level. -999 is far outside the legal
+   range. Showing that bar (the "show main menu XP" checkbox, or anything that
+   calls ParagonExpBar_UpdatePosition) hits the same renderer. Use 0 or a small
+   positive level. The status bar was locally set to frameLevel="1" and the
+   parent level was removed. The launcher puts -1 and -999 back.
+
+   Also on the window, these are set to 999:
+
+   ParagonCharacterLevel     frameLevel="999"
+   ParagonTargetLevel        frameLevel="999"
+   $parentOverlayFrame       frameLevel="999"
+
+   999 is not the 8192-byte overrun, but it is not a legal 3.3.5 level either.
+   Keep levels small.
+
+5. Templates that do not exist on 3.3.5.
+
+   Templates\UITemplate2X.xml, launcher default:
+
+   Close button:
+     inherits="CloseButtonTemplate, CloseButton2X"
+   CloseButton2X:
+     inherits="CloseButton"
+   Maximize control:
+     inherits="MaximizeMinimizeButtonFrameTemplate"
+
+   Build 12340 names are:
+
+     UIPanelCloseButton
+     (there is no CloseButtonTemplate)
+     (there is no CloseButton)
+     (there is no MaximizeMinimizeButtonFrameTemplate)
+
+   Inheriting a missing template makes the frame fail to build, or, on a
+   half-patched client, pulls in a retail control this exe cannot draw.
+   Use UIPanelCloseButton. Make the maximize/minimize frame an empty hidden
+   frame with a parentKey, unless you also ship a 3.3.5 template for it.
+
+6. Retail OnLoad chain.
+
+   PortraitFrame2X, launcher default:
+
+     <OnLoad>
+         getmetatable(self).__index.OnLoad(self);
+         SetPortraitToTexture(...);
+     </OnLoad>
+
+   That is how retail calls the parent template's OnLoad. On 12340 the Frame
+   metatable has no XML OnLoad. A child OnLoad replaces MetalFrame2X's OnLoad,
+   it does not chain it. Copy the parent body instead:
+
+     self:RegisterForDrag("LeftButton");
+     self:SetResizable(true);
+     self:SetMinResize(100, 100);
+     self:SetClampedToScreen(true);
+
+   If __index.OnLoad is nil this is a Lua error at frame create, which is a
+   different symptom from error #132. If a custom client defined that method
+   and it touches retail textures, it joins the same draw crash. Do not call
+   it on 12340.
+
+7. Missing sound file.
+
+   MaximizeButton2X and MinimizeButton2X:
+
+     PlaySoundFile("Interface/FrameXML/Sound/uchatscrollbutton.ogg");
+
+   That ogg is not in a 3.3.5 client. It is not the access violation (those
+   buttons are hidden). It is still wrong. Use:
+
+     PlaySound("UChatScrollButton");
+
+Files that already exist on 3.3.5 and do not crash
+---------------------------------------------------
+These were substituted locally so /paragon could open. The window then looks
+like a stock dialog. That is expected. The point is the draw no longer enters
+the bad blit.
+
+  Interface\DialogFrame\UI-DialogBox-Background
+  Interface\DialogFrame\UI-DialogBox-Border
+  Interface\DialogFrame\UI-DialogBox-Header
+  Interface\DialogFrame\UI-DialogBox-Gold-Dragon
+  Interface\Buttons\UI-Panel-Button-Up
+  Interface\Buttons\UI-Panel-Button-Down
+  Interface\Buttons\UI-Panel-Button-Disabled
+  Interface\Buttons\UI-Panel-Button-Highlight
+  Interface\Buttons\UI-Panel-MinimizeButton-Up
+  Interface\Buttons\UI-Panel-MinimizeButton-Down
+  Interface\Buttons\UI-Panel-MinimizeButton-Highlight
+  Interface\Minimap\MiniMap-TrackingBorder
+  Interface\PaperDollInfoFrame\UI-Character-Skills-Bar
+  Interface\PaperDollInfoFrame\UI-ReputationWatchBar
+  Interface\Icons\INV_Misc_QuestionMark
+  Interface\TargetingFrame\UI-StatusBar
+
+UI-DialogBox-Gold-Dragon is a real 3.3.5 texture. It is not the crash. The
+crash is asking the 12340 uploader to ingest a retail 2x atlas.
+
+What has to ship in the launcher addon
+---------------------------------------
+The launcher overwrites Interface\AddOns\AethroParagon. A local edit does not
+survive the next client update. The distributed copies of these two files
+have to change:
+
+  Templates\UITemplate2X.xml
+  Paragon\UIParagon.xml
+  Paragon\ParagonExpBar.xml
+
+Do all of the following in the copy the launcher installs:
+
+  a. Delete every horizTile="true" and vertTile="true".
+  b. On BorderTop, TexCoords must not be left="0" right="0".
+     Use left="0" right="1".
+  c. Replace every path in the retail list above with a 3.3.5 file,
+     OR supply real BLPs that build 12340 can upload:
+       BLP1, DXT1 or DXT5 or uncompressed,
+       power-of-two size,
+       no BC7 / BPTC,
+       mip chain the 12340 loader expects.
+     Dropping the files in as retail exports will keep hitting 0x00411EDE.
+  d. HighlightBottom: bottom must be greater than top.
+  e. ParagonExpBar frameLevel must not be -1.
+     The status bar must not be -999.
+  f. Close button inherits UIPanelCloseButton, not CloseButtonTemplate
+     or CloseButton.
+  g. Do not inherit MaximizeMinimizeButtonFrameTemplate unless you add that
+     template to this client.
+  h. Do not call getmetatable(self).__index.OnLoad(self).
+  i. PlaySound("UChatScrollButton"), not PlaySoundFile of the retail ogg.
+
+Patching Wow.exe instead
+-------------------------
+The fault is inside the stock 12340 binary at 0x00411EDE. Fixing the addon
+is the compatible fix. If the art must stay retail, the client binary and the
+MPQs have to be patched together so that:
+
+  - the BLP loader allocates a destination that is at least the decoded size
+  - the 8192-byte copy is not used for a texture whose pitch is larger
+  - horizTile with a zero texel width is rejected instead of looping
+  - negative frame levels are clamped
+
+The exe the player is running does not do that. Error #132 on this address
+means the renderer was given a texture or a tile it cannot copy.
+
+What this is not
+----------------
+  Not a Lua bug in SendClientRequest. That function only whispers addon messages.
+  Not WTF corruption. WTF was archived. The crash remained.
+  Not the cache. The cache was deleted. The crash remained.
+  Not AethroTitles, GuildVillageHelper, or ReagentBankUI. They were loaded and
+  none of them draw UIParagon. The addon field on the crash is null.
+  Not an NVIDIA driver bug. The GPU threads were waiting. The faulting thread
+  is the game thread inside Wow.exe.
+  Not a one-off bad pointer. Three crashes, same EIP, same EDI+0x40 write, same
+  8192-byte copy length.
+
+How to confirm the fix
+----------------------
+1. Install the corrected AethroParagon from the launcher.
+2. Delete Cache\WDB and Cache if you want a clean texture load. Not required
+   once the XML no longer references the bad files.
+3. Log in with only the server addons enabled.
+4. Type /paragon.
+5. The window must open. Wow.exe must stay up.
+6. Toggle the main-menu XP checkbox so ParagonExpBar is shown. That path used
+   frameLevel -1 / -999 and has to survive too.
+
+Player: Sulton, character Sultonmrp
+Logs:   18 Oct 2026 crash, and C:\Users\Sulton\Desktop\Warcraft\crash_error.txt
+        (21 Oct 2026 1:46:23 AM)
