@@ -1,0 +1,42 @@
+HOW TO CONVERT RETAIL/CLASSIC .BLP TEXTURES FOR THE 3.3.5a CLIENT
+===================================================================
+
+To successfully use a modern Retail or Classic texture in the legacy 3.3.5a engine, you must resolve three incompatibility roadblocks: archive format (CASC vs MPQ), modern texture compression formats, and resolution/memory constraints.
+
+Follow this step-by-step conversion pipeline:
+
+STEP 1: EXTRACT THE ASSET FROM RETAIL
+-------------------------------------
+Because modern WoW uses the CASC file structure, you cannot simply look through your game folders for image files. 
+1. Download a modern asset exporter tool like WoW.export (https://wow.export.top/).
+2. Load your Retail or Classic installation within the tool.
+3. Search for your desired texture, model, or UI asset.
+4. Export the file. Crucially, configure the tool settings to automatically export the asset as a neutral standard image format, preferably .PNG or .TGA (Targa). 
+
+STEP 2: RESIZE AND OPTIMIZE (PHOTOSHOP / GIMP)
+----------------------------------------------
+The 3.3.5a engine is a 32-bit application and will crash with Out Of Memory (OOM) errors if forced to load too many high-resolution textures.
+1. Open your exported .PNG or .TGA file in an image editor.
+2. Check the dimensions. Modern textures are often 2K (2048x2048) or 4K. You should downscale the image to a maximum of 512x512 or 1024x1024 pixels.
+3. Maintain the "Power of Two" rule. Both the width and height MUST be a power of two (e.g., 64, 128, 256, 512, 1024). A texture that is 500x500 will fail to load entirely.
+4. If your texture requires transparency (like a piece of armor or UI element), ensure it contains a properly configured Alpha Channel before saving.
+
+STEP 3: RE-ENCODE TO LEGACY .BLP2 FORMAT
+---------------------------------------
+You must compress the image data into a structural profile that a 2008 graphics engine understands.
+1. Use a legacy-compatible conversion tool such as BLPLab, BLP2PNG, or the BLP plugin for Photoshop/GIMP.
+2. Load your resized .PNG/.TGA file.
+3. Select the correct Legacy BLP2 compression scheme:
+   - DXT1: For solid textures with NO transparency (saves memory).
+   - DXT3 or DXT5: For textures requiring Alpha Channel transparency (UI elements, spells, glowing effects).
+   - Avoid modern RAW3 or BC7 profiles entirely, as they cause immediate Fatal Error 134 crashes in 3.3.5a.
+4. Ensure "Generate Mipmaps" is checked in your converter tool settings so the GPU can scale down the texture smoothly at a distance.
+5. Save the output file as a .BLP.
+
+STEP 4: PACK INTO A CUSTOM 3.3.5a .MPQ
+---------------------------------------
+1. Use an MPQ editor tool (such as Ladik's MPQ Editor).
+2. Create a new archive and name it following the standard naming convention (e.g., "patch-X.mpq" where X is a capital letter or number not already in your directory).
+3. Replicate the precise internal folder structure inside the MPQ that the 3.3.5a game engine expects for that specific texture (e.g., "Textures\ActiveSkills\" or "Interface\Icons\").
+4. Drop your converted legacy .BLP into that folder path inside the archive.
+5. Save the MPQ file and place it in your 3.3.5a client's 'Data' directory.
