@@ -1,0 +1,24 @@
+WORLD OF WOWCRAFT: COMPATIBILITY GUIDE (RETAIL/CLASSIC BLP TO 3.3.5a)
+
+What happens if you use a raw Retail or modern Classic .BLP file directly inside a legacy 3.3.5a client?
+
+One of three things will happen depending on how that specific asset was encoded by Blizzard:
+
+1. THE GAME CLIENT CRASHES (FATAL ERROR #134)
+This is the most common result. Modern WoW utilizes newer BLP structures, including uncompressed RAW3 (BGRA) color encoding or high-spec BC7 texture compression profiles. When the 2008 3.3.5a engine encounters these modern headers, it fails to parse the file format. The client will instantly throw a "Fatal Exception Error #134 (Memory Allocation / Corrupt File)" and force-close.
+
+2. THE TEXTURE APPEARS AS A SOLID NEON GREEN BOX
+If the game does not crash, it will often fail to load the image data entirely. In World of Warcraft, when the engine detects a file path but cannot read or decode the data inside the image container, it renders a bright green fallback texture over the item, UI element, or object.
+
+3. OUT OF MEMORY (OOM) CRASHES DURING GAMEPLAY
+Even if the texture happens to be encoded in a format the 3.3.5a engine recognizes (like standard DXT5), Retail textures are often 2K (2048x2048) or 4K in resolution.
+- The 3.3.5a client is a strictly 32-bit application limited to roughly 2GB of RAM execution space.
+- Loading just a handful of these massive uncompressed textures into the legacy engine will rapidly bleed through the client's available memory pool, triggering sudden "Out of Memory" crashes during loading screens or in densely populated areas like Dalaran.
+
+
+THE WORKAROUND WORKFLOW FOR MODDERS:
+To successfully migrate an asset from Retail to 3.3.5a, follow this pipeline:
+
+1. EXTRACT: Use a modern extraction tool to rip the asset from the Retail client into a neutral format like .PNG or .TGA.
+2. DOWNSCALE: Open the image in an editor (like Photoshop or GIMP) and downscale its resolution to a 3.3.5a-friendly size (usually 512x512 or 1024x1024 maximum) while ensuring dimensions stay on a strict power-of-two grid (e.g., 256, 512, 1024).
+3. RE-ENCODE: Run the image through a legacy converter tool configured specifically for BLP2 legacy specifications using DXT1 (no alpha) or DXT3/5 (with alpha transparency).
